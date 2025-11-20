@@ -1,7 +1,7 @@
 #define NOB_IMPLEMENTATION
 #include "nob.h"
 
-#define INPUT_FOLDER "src/"
+#define INPUT_FOLDER "examples/"
 #define OUTPUT_FOLDER "build/"
 
 int compile_socket_program(char* input_file, char* output_file, bool debug) {
@@ -10,6 +10,7 @@ int compile_socket_program(char* input_file, char* output_file, bool debug) {
     if(debug)
         nob_cmd_append(&cmd, "-g", "-O0");
     nob_cc_flags(&cmd);
+    nob_cmd_append(&cmd, "-Isrc/");
     nob_cmd_append(&cmd, "-luser32", "-lWs2_32");
     nob_cmd_append(&cmd, "-o", output_file);
     nob_cc_inputs(&cmd, input_file);
