@@ -3,51 +3,49 @@
 #define MSOCK_IMPLEMENTATION
 #include "msock.h"
 
-void handle_client(msock_server *server) {
+bool handle_connect(msock_client *client) {
+    (void) client;
+    //if(strcmp(client->ip, "specific ip") == 0) return false;
 
-    char receive_buffer[1024];
-    msock_message receive_msg = {
-        .size = 1024,
-        .buffer = receive_buffer
-    };
+    return true;
+}
 
-    while(1) {
-        if (!msock_server_receive(server, &receive_msg)) {
-            printf("Client disconnected or receive failed.\n");
-            break; 
-        }
+bool handle_client(msock_server *server, msock_client *client) {
+    (void) server;
 
-        printf("Received: %s\n", receive_msg.buffer);
+    char receive_buffer[256];
+    msock_message receive_msg = { .size = 256, .buffer = receive_buffer };
 
-        if(msock_server_send(server, &receive_msg)) {
-            printf("Send: %s\n", receive_msg.buffer);
-        }
+    if (!msock_client_receive(client, &receive_msg)) {
+        printf("Client disconnected or receive failed.\n");
+        return false;
     }
+    printf("Received: %s\n", receive_msg.buffer);
 
-    msock_server_close_client(server);
+    msock_client_send(client, &receive_msg);
+    //msock_server_broadcast(server, &receive_msg);
+
+    return true;
 }
 
 int main(void) {
 
+    msock_init();
+
     msock_server server;
     msock_server_listen(&server, "127.0.0.1", "420");
+    msock_server_set_connect_cb(&server, handle_connect);
+    msock_server_set_client_cb(&server, handle_client);
+
+    printf("msock server started...");
 
     while(msock_server_is_listening(&server)) {
-
-        msock_status status = msock_server_accept(&server);
-        if(status == MSOCK_ERROR) {
-            printf("Error in msock_server_accept()\n");
-            break;
-        }
-
-        if(status == MSOCK_SUCCESS) {
-            printf("Accepting client socket succeeded!\n");
-
-            handle_client(&server); 
-        }
+        msock_server_run(&server);
     }
 
     msock_server_close(&server);
+
+    msock_deinit();
 
     return 0;
 }

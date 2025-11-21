@@ -6,7 +6,10 @@
 
 int main(void) {
     
+    msock_init();
+
     msock_client client;
+    msock_client_create(&client);
     msock_client_connect(&client, "127.0.0.1", "420");
 
     char receive_buffer[1024];
@@ -30,6 +33,8 @@ int main(void) {
     }
 
     msock_client_close(&client);
+
+    msock_deinit();
 
     return 0;
 }
