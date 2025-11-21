@@ -1,4 +1,4 @@
-# Minimal Sockets
+# Minimal (Win)Sockets
 
 ![Status](https://img.shields.io/badge/status-development-orange) ![Language](https://img.shields.io/badge/language-C-blue)
 
