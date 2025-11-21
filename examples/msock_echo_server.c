@@ -4,9 +4,8 @@
 #include "msock.h"
 
 bool handle_connect(msock_client *client) {
-    (void) client;
-    //if(strcmp(client->ip, "specific ip") == 0) return false;
-
+    printf("Client connected with IP: %s\n", client->ip_addr);
+    
     return true;
 }
 
@@ -21,9 +20,7 @@ bool handle_client(msock_server *server, msock_client *client) {
         return false;
     }
     printf("Received: %s\n", receive_msg.buffer);
-
-    msock_client_send(client, &receive_msg);
-    //msock_server_broadcast(server, &receive_msg);
+    msock_server_broadcast(server, &receive_msg);
 
     return true;
 }
@@ -37,7 +34,7 @@ int main(void) {
     msock_server_set_connect_cb(&server, handle_connect);
     msock_server_set_client_cb(&server, handle_client);
 
-    printf("msock server started...");
+    printf("msock server started...\n");
 
     while(msock_server_is_listening(&server)) {
         msock_server_run(&server);

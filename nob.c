@@ -30,8 +30,8 @@ int main(int argc, char** argv)
         debug = true;
     }
     
-    if(compile_socket_program(INPUT_FOLDER"msock_client.c", OUTPUT_FOLDER"msock_client.exe", debug) != 0) printf("Failed building client\n");
-    if(compile_socket_program(INPUT_FOLDER"msock_server.c", OUTPUT_FOLDER"msock_server.exe", debug) != 0) printf("Failed building server\n");
+    if(compile_socket_program(INPUT_FOLDER"msock_echo_client.c", OUTPUT_FOLDER"msock_echo_client.exe", debug) != 0) printf("Failed building echo client\n");
+    if(compile_socket_program(INPUT_FOLDER"msock_echo_server.c", OUTPUT_FOLDER"msock_echo_server.exe", debug) != 0) printf("Failed building echo server\n");
     
     return 0;
 }

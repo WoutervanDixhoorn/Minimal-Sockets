@@ -82,6 +82,8 @@ msock_status msock_server_accept(msock_server *server_socket);
 bool msock_server_close(msock_server *server_socket);
 bool msock_server_close_client(msock_server *server_socket);
 
+bool msock_server_broadcast(msock_server *server_socket, msock_message *boardcast_msg);
+
 void msock_server_set_connect_cb(msock_server *server_socket, msock_on_connect_cb cb);
 void msock_server_set_client_cb(msock_server *server_socket, msock_on_client_cb cb);
 
@@ -294,53 +296,70 @@ msock_status msock_server_accept(msock_server *server_socket) {
     return MSOCK_SUCCESS;
 }
 
-// bool msock_server_close_client(msock_server *server_socket) {
-//     SOCKET client_sock = server_socket->native_client_socket;
-
-//     if (client_sock == INVALID_SOCKET) return false;
-
-//     if (shutdown(client_sock, SD_BOTH) == SOCKET_ERROR) {
-//         printf("shutdown() failed: %d\n", WSAGetLastError()); 
-//         return false;
-//     }
-
-//     closesocket(client_sock); 
-//     server_socket->native_client_socket = INVALID_SOCKET;
-
-//     return true;
-// }
-
-// bool msock_server_send(msock_server *server_socket, msock_message *msg) {
-//     if(server_socket->native_client_socket == INVALID_SOCKET) return false;
-
-//     int success = send(server_socket->native_client_socket, msg->buffer, msg->len, 0);
-//     if(success == SOCKET_ERROR) {
-//         printf("send() failed: %d\n", WSAGetLastError());
-//         return false;
-//     }
-
-//     return true;    
-// }
-
-// bool msock_server_receive(msock_server *server_socket, msock_message *result_msg) {
-//     if(server_socket->socket_state != MSOCK_STATE_LISTENING) return false;
-
-//     int bytes_received = recv(server_socket->native_client_socket, result_msg->buffer, result_msg->size - 1, 0); //NOTE: recv is a blocking function
-
-//     if(bytes_received == 0) {
-//         printf("Connection closed!\n");
-//         return false;
-//     }
-
-//     if(bytes_received < 0) {
-//         printf("Connection lost: %d\n", WSAGetLastError());
-//         return false;
-//     }
+static void msock_internal_handle_accept(msock_server *server) {
+    struct sockaddr_in address;
+    int addrlen = sizeof(address);
     
-//     result_msg->buffer[bytes_received] = '\0';
-//     result_msg->len = bytes_received;
-//     return true;
-// }
+    SOCKET new_socket = accept(server->native_socket, (struct sockaddr*)&address, &addrlen);
+    
+    if (new_socket == INVALID_SOCKET) {
+        printf("accept() failed, INVALID_SOCKET. Error: %d\n", WSAGetLastError());
+        return;
+    }
+
+    int free_slot = -1;
+    for(int i=0; i<MSOCK_MAX_CLIENTS; i++) {
+        if(server->connected_clients[i].socket_state == MSOCK_STATE_DISCONNECTED) {
+            free_slot = i;
+            break;
+        }
+    }
+
+    if (free_slot == -1) {
+        printf("Server full, rejecting connection.\n");
+        closesocket(new_socket);
+        return;
+    }
+
+    msock_client *c = &server->connected_clients[free_slot];
+    c->native_socket = new_socket;
+    c->socket_state = MSOCK_STATE_CONNECTED;
+    
+    inet_ntop(AF_INET, &address.sin_addr, c->ip_addr, INET_ADDRSTRLEN);
+    
+    u_long mode = 1;
+    ioctlsocket(new_socket, FIONBIO, &mode);
+
+    bool allow = true;
+    if (server->connect_cb != NULL) {
+        allow = server->connect_cb(c);
+    }
+
+    if (!allow) {
+        closesocket(new_socket);
+        c->socket_state = MSOCK_STATE_DISCONNECTED;
+    }
+}
+
+static void msock_internal_handle_clients(msock_server *server, fd_set *readfds) { 
+    for (int i = 0; i < MSOCK_MAX_CLIENTS; i++) {
+        msock_client *client = &server->connected_clients[i];
+
+        if (client->socket_state == MSOCK_STATE_CONNECTED && 
+            FD_ISSET(client->native_socket, readfds)) {
+            
+            bool keep_alive = true;
+            if (server->client_cb != NULL) {
+                keep_alive = server->client_cb(server, client);
+            }
+
+            if (!keep_alive) {
+                msock_client_close(client);
+                client->socket_state = MSOCK_STATE_DISCONNECTED;
+            }
+        }
+    }
+}
 
 bool msock_server_run(msock_server *server) {
     fd_set readfds;
@@ -355,73 +374,29 @@ bool msock_server_run(msock_server *server) {
         }
     }
 
-    int activity = select(0, &readfds, NULL, NULL, NULL); //Timout NULL = wait forever
-
+    int activity = select(0, &readfds, NULL, NULL, NULL);
     if (activity == SOCKET_ERROR) {
         printf("select() error: %d\n", WSAGetLastError());
         return false;
     }
 
     if (FD_ISSET(server->native_socket, &readfds)) {
-        struct sockaddr_in address;
-        int addrlen = sizeof(address);
-        SOCKET new_socket = accept(server->native_socket, (struct sockaddr*)&address, &addrlen);
-
-        if (new_socket != INVALID_SOCKET) {
-            int free_slot = -1;
-            for(int i=0; i<MSOCK_MAX_CLIENTS; i++) {
-                if(server->connected_clients[i].socket_state == MSOCK_STATE_DISCONNECTED) {
-                    free_slot = i;
-                    break;
-                }
-            }
-
-            if (free_slot != -1) {
-                msock_client *c = &server->connected_clients[free_slot];
-                c->native_socket = new_socket;
-                c->socket_state = MSOCK_STATE_CONNECTED;
-                inet_ntop(AF_INET, &address.sin_addr, c->ip_addr, INET_ADDRSTRLEN);
-                
-                u_long mode = 1;
-                ioctlsocket(new_socket, FIONBIO, &mode);
-
-                // A3. Call the User's "On Connect" Callback
-                bool allow_connection = true;
-                if (server->connect_cb != NULL) {
-                    allow_connection = server->connect_cb(c);
-                }
-
-                if (!allow_connection) {
-                    // User rejected (IP Ban, etc.)
-                    closesocket(new_socket);
-                    c->socket_state = MSOCK_STATE_DISCONNECTED;
-                } 
-            } else {
-                // Server Full
-                printf("Server full, rejecting connection.\n");
-                closesocket(new_socket);
-            }
-        }
+        msock_internal_handle_accept(server);
     }
 
-    for (int i = 0; i < MSOCK_MAX_CLIENTS; i++) {
-        msock_client *client = &server->connected_clients[i];
+    msock_internal_handle_clients(server, &readfds);
 
-        if (client->socket_state == MSOCK_STATE_CONNECTED) {
-            if (FD_ISSET(client->native_socket, &readfds)) {
-                
-                bool keep_alive = true;
-                if (server->client_cb != NULL) {
-                    keep_alive = server->client_cb(server, client);
-                }
+    return true;
+}
 
-                if (!keep_alive) {
-                    msock_client_close(client);
-                    client->socket_state = MSOCK_STATE_DISCONNECTED;
-                }
-            }
-        }
+bool msock_server_broadcast(msock_server *server_socket, msock_message *broadcast_msg) {
+
+    for(int i = 0; i < MSOCK_MAX_CLIENTS; i++) {
+        if(server_socket->connected_clients[i].socket_state == MSOCK_STATE_DISCONNECTED) continue;
+    
+        msock_client_send(&server_socket->connected_clients[i], broadcast_msg);
     }
+
 
     return true;
 }
