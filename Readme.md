@@ -25,7 +25,7 @@ The immediate roadmap for this library includes:
 * Take a look inside the examples folder on how to use the library.
 * To build the examples just bootstrap the nob.c by compling it one time into nob.exe and just run. To include debug symbols run `.\nob.exe -d`
 
-## Refrences
+## References
 * Tsoding (Nobuild): This project makes use of the [Nobuild](https://github.com/tsoding/nobuild) concept by Tsoding. 
 A huge shoutout to the [Tsoding Daily](https://www.youtube.com/@TsodingDaily) channel. his content inspired me to start 
 learning C for fun!
