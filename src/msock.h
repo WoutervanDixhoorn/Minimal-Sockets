@@ -1,12 +1,40 @@
 #ifndef MSOCK_H
 #define MSOCK_H
 
-#include <ws2tcpip.h>
-#include <winsock.h>
-
-#include <assert.h>
-#include <string.h>
+#include <stdio.h>
 #include <stdbool.h>
+#include <string.h>
+#include <stdlib.h>
+
+#ifdef _WIN32
+    #include <ws2tcpip.h>
+    #include <winsock.h>
+
+    typedef int socklen_t;
+#else
+#include <sys/types.h>
+    #include <sys/socket.h>
+    #include <netinet/in.h>
+    #include <arpa/inet.h>
+    #include <netdb.h>
+    #include <unistd.h>
+    #include <fcntl.h>
+    #include <errno.h>
+
+    //Map Types
+    #define SOCKET int
+    #define INVALID_SOCKET -1
+    #define SOCKET_ERROR -1
+
+    //Map Functions
+    #define closesocket close
+    #define WSAGetLastError() (errno)
+    
+    //Map Constants
+    #define WSAEWOULDBLOCK EWOULDBLOCK
+    #define SD_SEND SHUT_WR 
+    #define SD_BOTH SHUT_RDWR
+#endif
 
 #define MSOCK_MAX_CLIENTS 64
 
@@ -41,21 +69,19 @@ typedef enum {
 
 struct msock_client {
     SOCKET native_socket;
-    char ip_addr[INET_ADDRSTRLEN];
-
     msock_protocol socket_protocol;
     msock_state socket_state;
+
+    char ip_addr[INET_ADDRSTRLEN];
 
     void *user_data;
 };
 
 struct msock_server {
     SOCKET native_socket;
-
     msock_protocol socket_protocol;
     msock_state socket_state;
 
-    //SOCKET native_client_socket;
     msock_client connected_clients[MSOCK_MAX_CLIENTS];
     msock_on_connect_cb connect_cb;
     msock_on_disconnect_cb disconnect_cb;
@@ -71,6 +97,8 @@ typedef struct {
 bool msock_init();
 bool msock_deinit();
 bool msock_get_local_ip(char *buffer, size_t buffer_len);
+
+void msock_set_nonblocking(SOCKET sock);
 
 bool msock_client_create(msock_client *client_result);
 bool msock_client_connect(msock_client *client_socket, const char* ip, const char* port);
@@ -99,6 +127,7 @@ void msock_server_set_client_cb(msock_server *server_socket, msock_on_client_cb 
 //BASE UTIL
 
 bool msock_init() {
+#ifdef _WIN32
     WSADATA wsa_data;
 
     int success = WSAStartup(MAKEWORD(2,2), &wsa_data);
@@ -106,13 +135,14 @@ bool msock_init() {
         printf("WSAStartup failed: %d\n", success);
         return false;
     }
-    
+#endif
     return true;
 }
 
 bool msock_deinit() {
+#ifdef _WIN32
     WSACleanup();
-
+#endif
     return true;
 }
 
@@ -152,6 +182,16 @@ bool msock_get_local_ip(char *buffer, size_t buffer_len) {
 
     freeaddrinfo(result);
     return found;
+}
+
+void msock_set_nonblocking(SOCKET sock) {
+#ifdef _WIN32
+    u_long mode = 1;
+    ioctlsocket(sock, FIONBIO, &mode);
+#else
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+#endif
 }
 
 //MSOCK_CLIENT Implementations
@@ -235,6 +275,7 @@ bool msock_client_receive(msock_client *client_socket, msock_message *result_msg
     if(bytes_received < 0) {
         int err = WSAGetLastError();
         if (err == WSAEWOULDBLOCK) {
+            result_msg->len = 0;
             return true;
         }
 
@@ -270,8 +311,7 @@ bool msock_server_create(msock_server *server_result) {
 }
 
 bool msock_server_listen(msock_server *server_socket, const char* ip, const char* port) {
-    u_long mode = 1;
-    ioctlsocket(server_socket->native_socket, FIONBIO, &mode); //Always non blocking for now!
+    msock_set_nonblocking(server_socket->native_socket);
 
     struct addrinfo hints = {0};
     hints.ai_family = AF_INET;
@@ -329,7 +369,7 @@ bool msock_server_close(msock_server *server_socket) {
 
 msock_status msock_server_accept(msock_server *server_socket) {
     struct sockaddr_in client_addr;
-    int addr_len = sizeof(client_addr);
+    socklen_t addr_len = sizeof(client_addr);
 
     SOCKET native_client = accept(server_socket->native_socket, (struct sockaddr*)&client_addr, &addr_len);
     
@@ -367,7 +407,7 @@ msock_status msock_server_accept(msock_server *server_socket) {
 
 static void msock_internal_handle_accept(msock_server *server) {
     struct sockaddr_in address;
-    int addrlen = sizeof(address);
+    socklen_t addrlen = sizeof(address);
     
     SOCKET new_socket = accept(server->native_socket, (struct sockaddr*)&address, &addrlen);
     
@@ -396,8 +436,7 @@ static void msock_internal_handle_accept(msock_server *server) {
     
     inet_ntop(AF_INET, &address.sin_addr, c->ip_addr, INET_ADDRSTRLEN);
     
-    u_long mode = 1;
-    ioctlsocket(new_socket, FIONBIO, &mode);
+    msock_set_nonblocking(new_socket);
 
     bool allow = true;
     if (server->connect_cb != NULL) {
@@ -437,14 +476,32 @@ bool msock_server_run(msock_server *server) {
 
     FD_SET(server->native_socket, &readfds);
 
+int max_fd = 0; 
+
+#ifndef _WIN32
+    // 2. Only calculate max_fd on Linux/Mac
+    max_fd = server->native_socket;
+
+    for (int i = 0; i < MSOCK_MAX_CLIENTS; i++) {
+        msock_client *client = &server->connected_clients[i];
+        if (client->socket_state == MSOCK_STATE_CONNECTED) {
+            FD_SET(client->native_socket, &readfds);
+            
+            if(client->native_socket > max_fd) {
+                max_fd = client->native_socket;
+            }
+        }
+    }
+#else
     for (int i = 0; i < MSOCK_MAX_CLIENTS; i++) {
         msock_client *client = &server->connected_clients[i];
         if (client->socket_state == MSOCK_STATE_CONNECTED) {
             FD_SET(client->native_socket, &readfds);
         }
     }
+#endif
 
-    int activity = select(0, &readfds, NULL, NULL, NULL);
+    int activity = select(max_fd + 1, &readfds, NULL, NULL, NULL);
     if (activity == SOCKET_ERROR) {
         printf("select() error: %d\n", WSAGetLastError());
         return false;
