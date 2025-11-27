@@ -14,6 +14,7 @@ typedef struct msock_client msock_client;
 typedef struct msock_server msock_server;
 
 typedef bool (*msock_on_connect_cb)(msock_client *client);
+typedef bool (*msock_on_disconnect_cb)(msock_client *client);
 typedef bool (*msock_on_client_cb)(msock_server *server, msock_client *client);
 
 typedef enum {
@@ -44,6 +45,8 @@ struct msock_client {
 
     msock_protocol socket_protocol;
     msock_state socket_state;
+
+    void *user_data;
 };
 
 struct msock_server {
@@ -55,6 +58,7 @@ struct msock_server {
     //SOCKET native_client_socket;
     msock_client connected_clients[MSOCK_MAX_CLIENTS];
     msock_on_connect_cb connect_cb;
+    msock_on_disconnect_cb disconnect_cb;
     msock_on_client_cb client_cb;
 };
 
@@ -66,6 +70,7 @@ typedef struct {
 
 bool msock_init();
 bool msock_deinit();
+bool msock_get_local_ip(char *buffer, size_t buffer_len);
 
 bool msock_client_create(msock_client *client_result);
 bool msock_client_connect(msock_client *client_socket, const char* ip, const char* port);
@@ -81,13 +86,73 @@ bool msock_server_is_listening(msock_server *server_socket);
 msock_status msock_server_accept(msock_server *server_socket);
 bool msock_server_close(msock_server *server_socket);
 bool msock_server_close_client(msock_server *server_socket);
+bool msock_server_run(msock_server *server);
 
 bool msock_server_broadcast(msock_server *server_socket, msock_message *boardcast_msg);
 
 void msock_server_set_connect_cb(msock_server *server_socket, msock_on_connect_cb cb);
+void msock_server_set_disconnect_cb(msock_server *server_socket, msock_on_disconnect_cb cb);
 void msock_server_set_client_cb(msock_server *server_socket, msock_on_client_cb cb);
 
 #ifdef MSOCK_IMPLEMENTATION
+
+//BASE UTIL
+
+bool msock_init() {
+    WSADATA wsa_data;
+
+    int success = WSAStartup(MAKEWORD(2,2), &wsa_data);
+    if(success != 0) {
+        printf("WSAStartup failed: %d\n", success);
+        return false;
+    }
+    
+    return true;
+}
+
+bool msock_deinit() {
+    WSACleanup();
+
+    return true;
+}
+
+bool msock_get_local_ip(char *buffer, size_t buffer_len) {
+    char hostname[256];
+    
+    if (gethostname(hostname, sizeof(hostname)) == -1) {
+        return false;
+    }
+
+    struct addrinfo hints = {0};
+    hints.ai_family = AF_INET;       // We only want IPv4
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_CANONNAME;
+
+    struct addrinfo *result = NULL;
+    
+    if (getaddrinfo(hostname, NULL, &hints, &result) != 0) {
+        return false;
+    }
+
+    struct addrinfo *ptr = NULL;
+    bool found = false;
+
+    for (ptr = result; ptr != NULL; ptr = ptr->ai_next) {
+        struct sockaddr_in *sock_addr = (struct sockaddr_in *)ptr->ai_addr;
+        
+        char ip_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &sock_addr->sin_addr, ip_str, INET_ADDRSTRLEN);
+
+        if (strcmp(ip_str, "127.0.0.1") != 0) {
+            snprintf(buffer, buffer_len, "%s", ip_str);
+            found = true;
+            break;
+        }
+    }
+
+    freeaddrinfo(result);
+    return found;
+}
 
 //MSOCK_CLIENT Implementations
 
@@ -118,10 +183,11 @@ bool msock_client_connect(msock_client *client_socket, const char* ip, const cha
     bool success = connect(client_socket->native_socket, info->ai_addr, (int)info->ai_addrlen) == 0;
     freeaddrinfo(info);
 
-    if(success) {
-        client_socket->socket_state = MSOCK_STATE_CONNECTED;
+    if(!success) {
+        
     }
 
+    client_socket->socket_state = MSOCK_STATE_CONNECTED;
     return success;
 }
 
@@ -131,12 +197,16 @@ bool msock_client_is_connected(msock_client *client_socket) {
 
 bool msock_client_close(msock_client *client_socket) {
     bool success = true;
+
+    if(client_socket->socket_state == MSOCK_STATE_DISCONNECTED) return success;
     if(shutdown(client_socket->native_socket, SD_SEND) == SOCKET_ERROR) {
         printf("shutdown() failed: %d\n", WSAGetLastError());
         success = false;
     }
 
     closesocket(client_socket->native_socket);
+
+    client_socket->socket_state = MSOCK_STATE_DISCONNECTED;
 
     return success;
 }
@@ -200,8 +270,6 @@ bool msock_server_create(msock_server *server_result) {
 }
 
 bool msock_server_listen(msock_server *server_socket, const char* ip, const char* port) {
-    msock_server_create(server_socket);
-
     u_long mode = 1;
     ioctlsocket(server_socket->native_socket, FIONBIO, &mode); //Always non blocking for now!
 
@@ -247,6 +315,7 @@ bool msock_server_close(msock_server *server_socket) {
             success = false;
         }
 
+        if (server_socket->disconnect_cb) server_socket->disconnect_cb(client);
         closesocket(client->native_socket);
 
         client->native_socket = INVALID_SOCKET;
@@ -341,20 +410,21 @@ static void msock_internal_handle_accept(msock_server *server) {
     }
 }
 
-static void msock_internal_handle_clients(msock_server *server, fd_set *readfds) { 
+static void msock_internal_handle_clients(msock_server *server_socket, fd_set *readfds) { 
     for (int i = 0; i < MSOCK_MAX_CLIENTS; i++) {
-        msock_client *client = &server->connected_clients[i];
+        msock_client *client = &server_socket->connected_clients[i];
 
         if (client->socket_state == MSOCK_STATE_CONNECTED && 
             FD_ISSET(client->native_socket, readfds)) {
             
             bool keep_alive = true;
-            if (server->client_cb != NULL) {
-                keep_alive = server->client_cb(server, client);
+            if (server_socket->client_cb != NULL) {
+                keep_alive = server_socket->client_cb(server_socket, client);
             }
 
             if (!keep_alive) {
                 msock_client_close(client);
+                server_socket->disconnect_cb(client);
                 client->socket_state = MSOCK_STATE_DISCONNECTED;
             }
         }
@@ -405,28 +475,12 @@ void msock_server_set_connect_cb(msock_server *server_socket, msock_on_connect_c
     server_socket->connect_cb = cb;
 }
 
+void msock_server_set_disconnect_cb(msock_server *server_socket, msock_on_disconnect_cb cb) {
+    server_socket->disconnect_cb = cb;
+}
+
 void msock_server_set_client_cb(msock_server *server_socket, msock_on_client_cb cb) {
     server_socket->client_cb = cb;
-}
-
-//BASE UTIL
-
-bool msock_init() {
-    WSADATA wsa_data;
-
-    int success = WSAStartup(MAKEWORD(2,2), &wsa_data);
-    if(success != 0) {
-        printf("WSAStartup failed: %d\n", success);
-        return false;
-    }
-    
-    return true;
-}
-
-bool msock_deinit() {
-    WSACleanup();
-
-    return true;
 }
 
 #endif //MSOCK_IMPLEMTATION
