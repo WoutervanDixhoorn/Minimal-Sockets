@@ -11,8 +11,9 @@
 The immediate roadmap for this library includes:
 1.  Solidifying the basic TCP connection logic + include the support for other protocols.
 2.  Transitioning from a simple **Echo Server** (current state) to a fully functional **Console Chat Application**.
-3.  Improving error handling and memory management.
-4.  Improving the overall structure and consistency of the library.
+3.  Adding support for Linux.
+4.  Improving error handling and memory management.
+5.  Improving the overall structure and consistency of the library.
 
 ## Getting Started
 
